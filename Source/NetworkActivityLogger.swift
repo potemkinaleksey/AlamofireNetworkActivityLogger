@@ -56,17 +56,44 @@ public class NetworkActivityLogger {
     public static let shared = NetworkActivityLogger()
     
     /// The level of logging detail. See NetworkActivityLoggerLevel enum for possible values. .info by default.
-    public var level: NetworkActivityLoggerLevel
+    public var level: NetworkActivityLoggerLevel {
+        get {
+            return queue.sync {
+                return internalLevel
+            }
+        }
+        set {
+            queue.sync {
+                internalLevel = newValue
+            }
+        }
+    }
     
     /// Omit requests which match the specified predicate, if provided.
-    public var filterPredicate: NSPredicate?
+    public var filterPredicate: NSPredicate? {
+        get {
+            return queue.sync {
+                return internalFilterPredicate
+            }
+        }
+        set {
+            queue.sync {
+                internalFilterPredicate = newValue
+            }
+        }
+    }
     
     private var startDates: [URLSessionTask: Date]
+    
+    private var internalLevel: NetworkActivityLoggerLevel
+    private var internalFilterPredicate: NSPredicate?
+    
+    private var queue = DispatchQueue(label: "\(NetworkActivityLogger.self) Queue")
     
     // MARK: - Internal - Initialization
     
     init() {
-        level = .info
+        internalLevel = .info
         startDates = [URLSessionTask: Date]()
     }
     
@@ -114,32 +141,36 @@ public class NetworkActivityLogger {
                 return
         }
         
-        if let filterPredicate = filterPredicate, filterPredicate.evaluate(with: request) {
-            return
-        }
-        
-        startDates[task] = Date()
-        
-        switch level {
-        case .debug:
-            logDivider()
+        queue.async {
             
-            print("\(httpMethod) '\(requestURL.absoluteString)':")
-            
-            if let httpHeadersFields = request.allHTTPHeaderFields {
-                logHeaders(headers: httpHeadersFields)
+            if let filterPredicate = self.internalFilterPredicate, filterPredicate.evaluate(with: request) {
+                return
             }
             
-            if let httpBody = request.httpBody, let httpBodyString = String(data: httpBody, encoding: .utf8) {
-                print(httpBodyString)
-            }
-        case .info:
-            logDivider()
+            self.startDates[task] = Date()
             
-            print("\(httpMethod) '\(requestURL.absoluteString)'")
-        default:
-            break
+            switch self.internalLevel {
+            case .debug:
+                self.logDivider()
+                
+                print("\(self.currentTimestampAndPrefixString()) \(httpMethod) '\(requestURL.absoluteString)':")
+                
+                if let httpHeadersFields = request.allHTTPHeaderFields {
+                    self.logHeaders(headers: httpHeadersFields)
+                }
+                
+                if let httpBody = request.httpBody, let httpBodyString = String(data: httpBody, encoding: .utf8) {
+                    print(httpBodyString)
+                }
+            case .info:
+                self.logDivider()
+                
+                print("\(self.currentTimestampAndPrefixString()) \(httpMethod) '\(requestURL.absoluteString)'")
+            default:
+                break
+            }
         }
+        
     }
     
     @objc private func networkRequestDidComplete(notification: Notification) {
@@ -153,60 +184,63 @@ public class NetworkActivityLogger {
                 return
         }
         
-        if let filterPredicate = filterPredicate, filterPredicate.evaluate(with: request) {
-            return
-        }
-        
-        var elapsedTime: TimeInterval = 0.0
-        
-        if let startDate = startDates[task] {
-            elapsedTime = Date().timeIntervalSince(startDate)
-            startDates[task] = nil
-        }
-        
-        if let error = task.error {
-            switch level {
-            case .debug, .info, .warn, .error:
-                logDivider()
-                
-                print("[Error] \(httpMethod) '\(requestURL.absoluteString)' [\(String(format: "%.04f", elapsedTime)) s]:")
-                print(error)
-            default:
-                break
-            }
-        } else {
-            guard let response = task.response as? HTTPURLResponse else {
+        queue.async {
+
+            if let filterPredicate = self.internalFilterPredicate, filterPredicate.evaluate(with: request) {
                 return
             }
             
-            switch level {
-            case .debug:
-                logDivider()
-                
-                print("\(String(response.statusCode)) '\(requestURL.absoluteString)' [\(String(format: "%.04f", elapsedTime)) s]:")
-                
-                logHeaders(headers: response.allHeaderFields)
-                
-                guard let data = sessionDelegate[task]?.delegate.data else { break }
+            var elapsedTime: TimeInterval = 0.0
+            
+            if let startDate = self.startDates[task] {
+                elapsedTime = Date().timeIntervalSince(startDate)
+                self.startDates[task] = nil
+            }
+            
+            if let error = task.error {
+                switch self.internalLevel {
+                case .debug, .info, .warn, .error:
+                    self.logDivider()
                     
-                do {
-                    let jsonObject = try JSONSerialization.jsonObject(with: data, options: .mutableContainers)
-                    let prettyData = try JSONSerialization.data(withJSONObject: jsonObject, options: .prettyPrinted)
-                    
-                    if let prettyString = String(data: prettyData, encoding: .utf8) {
-                        print(prettyString)
-                    }
-                } catch {
-                    if let string = NSString(data: data, encoding: String.Encoding.utf8.rawValue) {
-                        print(string)
-                    }
+                    print("\(self.currentTimestampAndPrefixString()) [Error] \(httpMethod) '\(requestURL.absoluteString)' [\(String(format: "%.04f", elapsedTime)) s]:")
+                    print(error)
+                default:
+                    break
                 }
-            case .info:
-                logDivider()
+            } else {
+                guard let response = task.response as? HTTPURLResponse else {
+                    return
+                }
                 
-                print("\(String(response.statusCode)) '\(requestURL.absoluteString)' [\(String(format: "%.04f", elapsedTime)) s]")
-            default:
-                break
+                switch self.internalLevel {
+                case .debug:
+                    self.logDivider()
+                    
+                    print("\(self.currentTimestampAndPrefixString()) \(String(response.statusCode)) '\(requestURL.absoluteString)' [\(String(format: "%.04f", elapsedTime)) s]:")
+                    
+                    self.logHeaders(headers: response.allHeaderFields)
+                    
+                    guard let data = sessionDelegate[task]?.delegate.data else { break }
+                    
+                    do {
+                        let jsonObject = try JSONSerialization.jsonObject(with: data, options: .mutableContainers)
+                        let prettyData = try JSONSerialization.data(withJSONObject: jsonObject, options: .prettyPrinted)
+                        
+                        if let prettyString = String(data: prettyData, encoding: .utf8) {
+                            print(prettyString)
+                        }
+                    } catch {
+                        if let string = NSString(data: data, encoding: String.Encoding.utf8.rawValue) {
+                            print(string)
+                        }
+                    }
+                case .info:
+                    self.logDivider()
+                    
+                    print("\(self.currentTimestampAndPrefixString()) \(String(response.statusCode)) '\(requestURL.absoluteString)' [\(String(format: "%.04f", elapsedTime)) s]")
+                default:
+                    break
+                }
             }
         }
     }
@@ -223,5 +257,14 @@ private extension NetworkActivityLogger {
             print("  \(key) : \(value)")
         }
         print("]")
+    }
+    
+    func currentTimestampAndPrefixString() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss:SSS"
+        
+        let timestampString = formatter.string(from: Date())
+        return timestampString + ": -->"
     }
 }
