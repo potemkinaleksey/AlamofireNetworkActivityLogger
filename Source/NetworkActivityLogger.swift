@@ -184,6 +184,8 @@ public class NetworkActivityLogger {
                 return
         }
         
+        let responseData = sessionDelegate[task]?.delegate.data
+        
         queue.async {
 
             if let filterPredicate = self.internalFilterPredicate, filterPredicate.evaluate(with: request) {
@@ -220,7 +222,7 @@ public class NetworkActivityLogger {
                     
                     self.logHeaders(headers: response.allHeaderFields)
                     
-                    guard let data = sessionDelegate[task]?.delegate.data else { break }
+                    guard let data = responseData else { break }
                     
                     do {
                         let jsonObject = try JSONSerialization.jsonObject(with: data, options: .mutableContainers)
